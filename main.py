@@ -267,6 +267,33 @@ def pending(req: Request):
     return {"pending": rows}
 
 
+@app.get("/api/decisions")
+def list_decisions(req: Request):
+    """查看已经确认(add)/忽略(ignore)过的活动，方便核对去重状态。"""
+    if not auth_ok(req):
+        raise HTTPException(status_code=401, detail="unauthorized")
+    with _lock:
+        conn = db()
+        cur = conn.cursor()
+        cur.execute(
+            """SELECT d.activity_id,
+                      c.date,
+                      c.activity_name,
+                      c.distance_km,
+                      c.duration_min,
+                      d.decision,
+                      d.name        AS mountain,
+                      d.count,
+                      d.decided_at
+               FROM decisions d
+               LEFT JOIN candidates c ON c.activity_id = d.activity_id
+               ORDER BY d.decided_at DESC"""
+        )
+        rows = [dict(r) for r in cur.fetchall()]
+        conn.close()
+    return {"decisions": rows}
+
+
 @app.post("/api/decide")
 async def decide(req: Request):
     if not auth_ok(req):
