@@ -1,0 +1,6 @@
+# 不要提交真实凭据与本地数据
+.env
+*.db
+data/
+__pycache__/
+*.pyc
