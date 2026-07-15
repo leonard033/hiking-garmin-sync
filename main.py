@@ -9,6 +9,10 @@ from fastapi import FastAPI, Request, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 import uvicorn
 from garminconnect import Garmin
+from garminconnect import (
+    GarminConnectAuthenticationError,
+    GarminConnectConnectionError,
+)
 
 # ---------- 配置（来自环境变量）----------
 PORT = int(os.getenv("PORT", "8000"))
@@ -69,6 +73,33 @@ def auth_ok(req: Request) -> bool:
 # 记录最近一次拉取的状态，供 /api/debug 排查
 LAST_PULL = {"time": None, "ok": None, "error": None, "total": 0, "added": 0, "types": {}}
 
+# Garmin OAuth token 持久化目录（重启/下次拉取可直接用 token，避免每次都输密码）
+_TOKENSTORE = os.path.join(os.path.dirname(DB_PATH), ".garminconnect")
+
+
+def get_garmin():
+    """构造并登录 Garmin 客户端。优先用已保存的 token，失败则回退账号密码登录。"""
+    os.makedirs(_TOKENSTORE, exist_ok=True)
+    api = Garmin(
+        email=GARMIN_USER,
+        password=GARMIN_PASS,
+        is_cn=GARMIN_IS_CN,
+        prompt_mfa=False,
+    )
+    try:
+        # 优先用已保存的 token 登录（更稳定，避免频繁密码认证触发风控）
+        api.login(_TOKENSTORE)
+        print("[login] 使用已保存 token 登录成功")
+    except Exception as e:
+        print("[login] token 登录失败，回退密码登录:", repr(e))
+        api.login()  # 账号密码登录（无 MFA）
+        try:
+            api.garth.dump(_TOKENSTORE)
+            print("[login] token 已保存，供下次使用")
+        except Exception as e2:
+            print("[login] 保存 token 失败(可忽略):", repr(e2))
+    return api
+
 
 def pull_once():
     if not (GARMIN_USER and GARMIN_PASS):
@@ -77,12 +108,7 @@ def pull_once():
                          error="未配置 GARMIN_USER / GARMIN_PASS")
         return
     try:
-        api = Garmin(
-            email=GARMIN_USER,
-            password=GARMIN_PASS,
-            is_cn=GARMIN_IS_CN,
-            prompt_mfa=False,
-        )
+        api = get_garmin()
         end = datetime.now()
         start = end - timedelta(days=LOOKBACK_DAYS)
         activities = api.get_activities_by_date(
@@ -135,6 +161,12 @@ def pull_once():
         print(f"[pull] 新增越野跑待确认 {added} 条")
         LAST_PULL.update(time=datetime.now().isoformat(), ok=True, error=None,
                          total=len(activities or []), added=added, types=type_counts)
+    except (GarminConnectAuthenticationError, GarminConnectConnectionError) as e:
+        # 登录/认证相关错误，单独标注，方便判断是密码错还是 MFA 问题
+        msg = f"{type(e).__name__}: {e}"
+        print("[pull] 认证失败:", msg)
+        LAST_PULL.update(time=datetime.now().isoformat(), ok=False,
+                         error="AUTH_FAIL: " + msg)
     except Exception as e:
         print("[pull] 拉取失败:", repr(e))
         LAST_PULL.update(time=datetime.now().isoformat(), ok=False, error=repr(e))

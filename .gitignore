@@ -2,5 +2,6 @@
 .env
 *.db
 data/
+.garminconnect/
 __pycache__/
 *.pyc
