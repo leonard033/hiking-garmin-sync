@@ -66,9 +66,15 @@ def auth_ok(req: Request) -> bool:
 
 
 # ---------- 拉取 Garmin ----------
+# 记录最近一次拉取的状态，供 /api/debug 排查
+LAST_PULL = {"time": None, "ok": None, "error": None, "total": 0, "added": 0, "types": {}}
+
+
 def pull_once():
     if not (GARMIN_USER and GARMIN_PASS):
         print("[pull] 未配置 GARMIN_USER / GARMIN_PASS，跳过")
+        LAST_PULL.update(time=datetime.now().isoformat(), ok=False,
+                         error="未配置 GARMIN_USER / GARMIN_PASS")
         return
     try:
         api = Garmin(
@@ -82,6 +88,12 @@ def pull_once():
         activities = api.get_activities_by_date(
             start.strftime("%Y-%m-%d"), end.strftime("%Y-%m-%d")
         )
+        # 统计各活动类型出现次数（用于排查过滤是否正确）
+        type_counts = {}
+        for a in activities or []:
+            atype = a.get("activityType") or {}
+            k = atype.get("typeKey") or (a.get("activityTypeDTO", {}) or {}).get("typeKey") or "unknown"
+            type_counts[k] = type_counts.get(k, 0) + 1
         added = 0
         with _lock:
             conn = db()
@@ -121,8 +133,11 @@ def pull_once():
             conn.commit()
             conn.close()
         print(f"[pull] 新增越野跑待确认 {added} 条")
+        LAST_PULL.update(time=datetime.now().isoformat(), ok=True, error=None,
+                         total=len(activities or []), added=added, types=type_counts)
     except Exception as e:
         print("[pull] 拉取失败:", repr(e))
+        LAST_PULL.update(time=datetime.now().isoformat(), ok=False, error=repr(e))
 
 
 def pull_loop():
@@ -153,6 +168,33 @@ app.add_middleware(
 @app.get("/api/health")
 def health():
     return {"ok": True}
+
+
+@app.get("/api/debug")
+def debug(req: Request):
+    """排查用：显示配置概览 + 最近一次拉取的状态/活动类型分布。"""
+    if not auth_ok(req):
+        raise HTTPException(status_code=401, detail="unauthorized")
+    return {
+        "config": {
+            "garmin_user_set": bool(GARMIN_USER),
+            "garmin_pass_set": bool(GARMIN_PASS),
+            "is_cn": GARMIN_IS_CN,
+            "trail_type": TRAIL_TYPE,
+            "lookback_days": LOOKBACK_DAYS,
+            "pull_interval_min": PULL_INTERVAL,
+        },
+        "last_pull": LAST_PULL,
+    }
+
+
+@app.post("/api/pull")
+def manual_pull(req: Request):
+    """手动触发一次拉取（省得等定时任务）。"""
+    if not auth_ok(req):
+        raise HTTPException(status_code=401, detail="unauthorized")
+    pull_once()
+    return {"ok": True, "last_pull": LAST_PULL}
 
 
 @app.get("/api/pending")
