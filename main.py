@@ -19,6 +19,7 @@ PORT = int(os.getenv("PORT", "8000"))
 SYNC_TOKEN = os.getenv("SYNC_TOKEN", "")
 GARMIN_USER = os.getenv("GARMIN_USER", "")
 GARMIN_PASS = os.getenv("GARMIN_PASS", "")
+GARMIN_TOKEN = os.getenv("GARMIN_TOKEN", "")  # 本地生成的 OAuth token base64
 GARMIN_IS_CN = os.getenv("GARMIN_IS_CN", "true").lower() in ("true", "1", "yes")
 PULL_INTERVAL = int(os.getenv("PULL_INTERVAL_MIN", "30"))
 LOOKBACK_DAYS = int(os.getenv("LOOKBACK_DAYS", "21"))
@@ -78,34 +79,53 @@ _TOKENSTORE = os.path.join(os.path.dirname(DB_PATH), ".garminconnect")
 
 
 def get_garmin():
-    """构造并登录 Garmin 客户端。优先用已保存的 token，失败则回退账号密码登录。"""
+    """构造并登录 Garmin 客户端。
+    优先级：1) GARMIN_TOKEN base64  2) 本地已保存 token  3) 账号密码登录
+    """
     os.makedirs(_TOKENSTORE, exist_ok=True)
+
+    # 方式 1: 环境变量里的 GARMIN_TOKEN（本地生成后填到 Railway）
+    if GARMIN_TOKEN:
+        try:
+            api = Garmin()
+            api.login(GARMIN_TOKEN)
+            print("[login] 使用 GARMIN_TOKEN 登录成功")
+            return api
+        except Exception as e:
+            print("[login] GARMIN_TOKEN 登录失败:", repr(e))
+
+    # 方式 2: 容器内已保存的 token 目录
+    try:
+        api = Garmin()
+        api.login(_TOKENSTORE)
+        print("[login] 使用已保存 token 登录成功")
+        return api
+    except Exception as e:
+        print("[login] 本地 token 登录失败:", repr(e))
+
+    # 方式 3: 账号密码登录
+    if not (GARMIN_USER and GARMIN_PASS):
+        raise RuntimeError("未配置 GARMIN_USER / GARMIN_PASS，且没有可用 token")
     api = Garmin(
         email=GARMIN_USER,
         password=GARMIN_PASS,
         is_cn=GARMIN_IS_CN,
         prompt_mfa=False,
     )
+    api.login()
     try:
-        # 优先用已保存的 token 登录（更稳定，避免频繁密码认证触发风控）
-        api.login(_TOKENSTORE)
-        print("[login] 使用已保存 token 登录成功")
-    except Exception as e:
-        print("[login] token 登录失败，回退密码登录:", repr(e))
-        api.login()  # 账号密码登录（无 MFA）
-        try:
-            api.garth.dump(_TOKENSTORE)
-            print("[login] token 已保存，供下次使用")
-        except Exception as e2:
-            print("[login] 保存 token 失败(可忽略):", repr(e2))
+        api.garth.dump(_TOKENSTORE)
+        print("[login] 账号密码登录成功，token 已保存")
+    except Exception as e2:
+        print("[login] 保存 token 失败(可忽略):", repr(e2))
     return api
 
 
 def pull_once():
-    if not (GARMIN_USER and GARMIN_PASS):
-        print("[pull] 未配置 GARMIN_USER / GARMIN_PASS，跳过")
+    if not (GARMIN_TOKEN or (GARMIN_USER and GARMIN_PASS)):
+        print("[pull] 未配置 GARMIN_USER / GARMIN_PASS / GARMIN_TOKEN，跳过")
         LAST_PULL.update(time=datetime.now().isoformat(), ok=False,
-                         error="未配置 GARMIN_USER / GARMIN_PASS")
+                        error="未配置 GARMIN_USER / GARMIN_PASS / GARMIN_TOKEN")
         return
     try:
         api = get_garmin()
@@ -211,6 +231,7 @@ def debug(req: Request):
         "config": {
             "garmin_user_set": bool(GARMIN_USER),
             "garmin_pass_set": bool(GARMIN_PASS),
+            "garmin_token_set": bool(GARMIN_TOKEN),
             "is_cn": GARMIN_IS_CN,
             "trail_type": TRAIL_TYPE,
             "lookback_days": LOOKBACK_DAYS,
